@@ -67,3 +67,11 @@ type UpdateUserRequest struct {
 	EmailVerified *bool                  `json:"email_verified,omitempty"`
 	CustomClaims  map[string]interface{} `json:"custom_claims,omitempty"`
 }
+
+// IncrementValue representa un valor de incremento para Firestore
+type IncrementValue int
+
+// Helper para crear un valor de incremento
+func Increment(value int) IncrementValue {
+	return IncrementValue(value)
+}
