@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	firebase "github.com/andrescris/firestore/lib/firebase"
@@ -41,13 +42,14 @@ type LogoutResponse struct {
 
 // SessionInfo información de sesión
 type SessionInfo struct {
-	SessionID string                 `json:"session_id"`
-	UID       string                 `json:"uid"`
-	Email     string                 `json:"email"`
-	CreatedAt time.Time              `json:"created_at"`
-	ExpiresAt time.Time              `json:"expires_at"`
-	Active    bool                   `json:"active"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+    SessionID string                 `json:"session_id"`
+    UID       string                 `json:"uid"`
+    Email     string                 `json:"email"`
+    CreatedAt time.Time              `json:"created_at"`
+    ExpiresAt time.Time              `json:"expires_at"`
+    Active    bool                   `json:"active"`
+    Metadata  map[string]interface{} `json:"metadata,omitempty"`
+    Claims    map[string]interface{} `json:"claims,omitempty"` // <-- AÑADE ESTA LÍNEA
 }
 
 // Login autentica un usuario con email/password
@@ -268,6 +270,14 @@ func getSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
 	if metadata, ok := doc.Data["metadata"].(map[string]interface{}); ok {
 		session.Metadata = metadata
 	}
+
+	claims, err := getUserClaims(ctx, session.UID)
+    if err != nil {
+        // No devolvemos un error si los claims no existen, simplemente estarán vacíos.
+        log.Printf("Advertencia: no se pudieron obtener los claims para el usuario %s: %v", session.UID, err)
+    } else {
+        session.Claims = claims
+    }
 
 	return session, nil
 }
