@@ -36,7 +36,6 @@ type BatchOperation struct {
 type UserRecord struct {
 	UID           string                 `json:"uid"`
 	Email         string                 `json:"email"`
-	PhoneNumber   string                 `json:"phone_number,omitempty"`
 	DisplayName   string                 `json:"display_name,omitempty"`
 	PhotoURL      string                 `json:"photo_url,omitempty"`
 	Disabled      bool                   `json:"disabled"`
@@ -46,12 +45,10 @@ type UserRecord struct {
 	LastLogInTime time.Time              `json:"last_login_time"`
 }
 
-// CreateUserRequest solicitud para crear usuario
+// CreateUserRequest solicitud para crear usuario (solo con email)
 type CreateUserRequest struct {
 	Email       string `json:"email"`
-	Password    string `json:"password"`
 	DisplayName string `json:"display_name,omitempty"`
-	PhoneNumber string `json:"phone_number,omitempty"`
 	PhotoURL    string `json:"photo_url,omitempty"`
 	Disabled    bool   `json:"disabled,omitempty"`
 }
@@ -59,13 +56,22 @@ type CreateUserRequest struct {
 // UpdateUserRequest solicitud para actualizar usuario
 type UpdateUserRequest struct {
 	Email         *string                `json:"email,omitempty"`
-	Password      *string                `json:"password,omitempty"`
 	DisplayName   *string                `json:"display_name,omitempty"`
-	PhoneNumber   *string                `json:"phone_number,omitempty"`
 	PhotoURL      *string                `json:"photo_url,omitempty"`
 	Disabled      *bool                  `json:"disabled,omitempty"`
 	EmailVerified *bool                  `json:"email_verified,omitempty"`
 	CustomClaims  map[string]interface{} `json:"custom_claims,omitempty"`
+}
+
+// RequestOTPRequest solicitud para pedir un OTP
+type RequestOTPRequest struct {
+	Email string `json:"email"`
+}
+
+// LoginWithOTPRequest solicitud de login con OTP
+type LoginWithOTPRequest struct {
+	Email string `json:"email"`
+	OTP   string `json:"otp"`
 }
 
 // IncrementValue representa un valor de incremento para Firestore
