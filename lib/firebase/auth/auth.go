@@ -183,3 +183,12 @@ func mapUserRecord(record *auth.UserRecord) *firebase.UserRecord {
 		LastLogInTime: time.Unix(record.UserMetadata.LastLogInTimestamp, 0),
 	}
 }
+
+
+func DeleteUser(ctx context.Context, uid string) error {
+	client := firebase.GetAuthClient()
+	if err := client.DeleteUser(ctx, uid); err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+	return nil
+}
