@@ -133,6 +133,50 @@ func LoginWithOTP(ctx context.Context, request firebase.LoginWithOTPRequest) (*L
 	}, nil
 }
 
+type SessionInfo struct {
+	UID       string
+	Email     string
+	Active    bool
+	Claims    map[string]interface{}
+	ExpiresAt time.Time
+}
+
+// ValidateSession verifica si una sesión es válida y activa.
+func ValidateSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
+	doc, err := firestore.GetDocument(ctx, "user_sessions", sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("sesión no encontrada")
+	}
+
+	active, _ := doc.Data["active"].(bool)
+	expiresAt, _ := doc.Data["expires_at"].(time.Time)
+
+	if !active || time.Now().After(expiresAt) {
+		return nil, fmt.Errorf("sesión inactiva o expirada")
+	}
+
+	uid, _ := doc.Data["uid"].(string)
+	email, _ := doc.Data["email"].(string)
+	claims, err := getUserClaims(ctx, uid)
+	if err != nil {
+		claims = make(map[string]interface{}) // Si no hay claims, devolver mapa vacío
+	}
+
+	return &SessionInfo{
+		UID:       uid,
+		Email:     email,
+		Active:    true,
+		Claims:    claims,
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+// Logout invalida una sesión de usuario.
+func Logout(ctx context.Context, sessionID string) error {
+	return firestore.UpdateDocument(ctx, "user_sessions", sessionID, map[string]interface{}{
+		"active": false,
+	})
+}
 
 // --- FUNCIONES AUXILIARES ---
 
