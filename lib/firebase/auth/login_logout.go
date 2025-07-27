@@ -2,20 +2,15 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
+	"math/big"
 	"time"
 
 	firebase "github.com/andrescris/firestore/lib/firebase"
 	"github.com/andrescris/firestore/lib/firebase/firestore"
-	"golang.org/x/crypto/bcrypt"
 )
-
-// LoginRequest estructura para solicitud de login
-type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
 
 // LoginResponse respuesta del login
 type LoginResponse struct {
@@ -28,89 +23,104 @@ type LoginResponse struct {
 	Claims       map[string]interface{} `json:"claims,omitempty"`
 }
 
-// LogoutRequest estructura para solicitud de logout
-type LogoutRequest struct {
-	UID       string `json:"uid"`
-	SessionID string `json:"session_id,omitempty"`
-}
-
-// LogoutResponse respuesta del logout
-type LogoutResponse struct {
+// RequestOTPResponse respuesta de la solicitud de OTP
+type RequestOTPResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
 
-// SessionInfo información de sesión
-type SessionInfo struct {
-    SessionID string                 `json:"session_id"`
-    UID       string                 `json:"uid"`
-    Email     string                 `json:"email"`
-    CreatedAt time.Time              `json:"created_at"`
-    ExpiresAt time.Time              `json:"expires_at"`
-    Active    bool                   `json:"active"`
-    Metadata  map[string]interface{} `json:"metadata,omitempty"`
-    Claims    map[string]interface{} `json:"claims,omitempty"` // <-- AÑADE ESTA LÍNEA
-}
-
-// Login autentica un usuario con email/password
-func Login(ctx context.Context, request LoginRequest) (*LoginResponse, error) {
+// RequestOTP genera y envía un OTP al usuario
+func RequestOTP(ctx context.Context, request firebase.RequestOTPRequest) (*RequestOTPResponse, error) {
 	// 1. Validar que el usuario existe
 	user, err := GetUserByEmail(ctx, request.Email)
 	if err != nil {
-		return &LoginResponse{
-			Success: false,
-			Message: "Usuario no encontrado o credenciales inválidas",
-		}, nil
+		return &RequestOTPResponse{Success: false, Message: "Usuario no encontrado."}, nil
 	}
 
-	// 2. Verificar si el usuario está activo
-	if user.Disabled {
-		return &LoginResponse{
-			Success: false,
-			Message: "Cuenta desactivada. Contacta al administrador",
-		}, nil
-	}
-
-	// 3. Verificar password (necesitas almacenar hash en Firestore)
-	valid, err := verifyPassword(ctx, user.UID, request.Password)
+	// 2. Generar un OTP numérico de 6 dígitos
+	otp, err := generateNumericOTP(6)
 	if err != nil {
-		return nil, fmt.Errorf("error verifying password: %w", err)
+		return nil, fmt.Errorf("error generating OTP: %w", err)
+	}
+
+	// 3. Guardar el OTP en Firestore
+	expiresAt := time.Now().Add(10 * time.Minute) // OTP válido por 10 minutos
+	otpData := map[string]interface{}{
+		"uid":         user.UID,
+		"email":       user.Email,
+		"otp":         otp,
+		"expires_at":  expiresAt,
+		"used":        false,
+	}
+
+	_, err = firestore.CreateDocument(ctx, "user_otps", otpData)
+	if err != nil {
+		return nil, fmt.Errorf("error saving OTP: %w", err)
+	}
+
+	// 4. Enviar el OTP (simulado)
+	log.Printf("✅ OTP para %s: %s (Válido por 10 minutos)", user.Email, otp)
+
+	return &RequestOTPResponse{
+		Success: true,
+		Message: "Se ha enviado un código de un solo uso a tu correo.",
+	}, nil
+}
+
+// LoginWithOTP autentica a un usuario usando un OTP
+func LoginWithOTP(ctx context.Context, request firebase.LoginWithOTPRequest) (*LoginResponse, error) {
+	// 1. Buscar el OTP en Firestore
+	queryOptions := firebase.QueryOptions{
+		Filters: []firebase.QueryFilter{
+			{Field: "email", Operator: "==", Value: request.Email},
+			{Field: "otp", Operator: "==", Value: request.OTP},
+			{Field: "used", Operator: "==", Value: false},
+		},
+		OrderBy:  "created_at",
+		OrderDir: "desc",
+		Limit:    1,
+	}
+
+	otpDocs, err := firestore.QueryDocuments(ctx, "user_otps", queryOptions)
+	if err != nil || len(otpDocs) == 0 {
+		return &LoginResponse{Success: false, Message: "OTP inválido o no encontrado."}, nil
 	}
 	
-	if !valid {
-		return &LoginResponse{
-			Success: false,
-			Message: "Credenciales inválidas",
-		}, nil
+	otpDoc := otpDocs[0]
+
+	// 2. Verificar si el OTP ha expirado
+	expiresAt := otpDoc.Data["expires_at"].(time.Time)
+	if time.Now().After(expiresAt) {
+		return &LoginResponse{Success: false, Message: "El OTP ha expirado."}, nil
 	}
 
-	// 4. Obtener claims del usuario (roles, permisos)
-	claims, err := getUserClaims(ctx, user.UID)
+	// 3. Marcar el OTP como usado
+	err = firestore.UpdateDocument(ctx, "user_otps", otpDoc.ID, map[string]interface{}{"used": true})
 	if err != nil {
-		// Si no hay claims, usar básicos
-		claims = map[string]interface{}{
-			"role": "user",
-		}
+		return nil, fmt.Errorf("error marking OTP as used: %w", err)
 	}
-
-	// 5. Crear token personalizado
+	
+	// 4. Obtener datos del usuario
+	uid := otpDoc.Data["uid"].(string)
+	user, err := GetUser(ctx, uid)
+	if err != nil {
+		return &LoginResponse{Success: false, Message: "No se pudo verificar al usuario."}, nil
+	}
+	
+	// 5. Crear token personalizado y sesión
+	claims, _ := getUserClaims(ctx, uid)
 	customToken, err := CreateCustomToken(ctx, user.UID, claims)
 	if err != nil {
 		return nil, fmt.Errorf("error creating custom token: %w", err)
 	}
-
-	// 6. Crear sesión
-	sessionID, expiresAt, err := createSession(ctx, user.UID, user.Email)
+	
+	sessionID, sessionExpiresAt, err := createSession(ctx, user.UID, user.Email)
 	if err != nil {
 		return nil, fmt.Errorf("error creating session: %w", err)
 	}
 
-	// 7. Actualizar último login
-	err = updateLastLogin(ctx, user.UID)
-	if err != nil {
-		// No es crítico si falla
-		fmt.Printf("Warning: failed to update last login: %v", err)
-	}
+	// 6. Actualizar último login
+	updateLastLogin(ctx, user.UID)
 
 	return &LoginResponse{
 		Success:     true,
@@ -118,251 +128,49 @@ func Login(ctx context.Context, request LoginRequest) (*LoginResponse, error) {
 		User:        user,
 		CustomToken: customToken,
 		SessionID:   sessionID,
-		ExpiresAt:   expiresAt,
+		ExpiresAt:   sessionExpiresAt,
 		Claims:      claims,
 	}, nil
 }
 
-// Logout cierra la sesión del usuario
-func Logout(ctx context.Context, request LogoutRequest) (*LogoutResponse, error) {
-	// 1. Invalidar sesión si se proporciona sessionID
-	if request.SessionID != "" {
-		err := invalidateSession(ctx, request.SessionID)
+
+// --- FUNCIONES AUXILIARES ---
+
+func generateNumericOTP(length int) (string, error) {
+	const digits = "0123456789"
+	otp := make([]byte, length)
+	for i := range otp {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
 		if err != nil {
-			return nil, fmt.Errorf("error invalidating session: %w", err)
+			return "", err
 		}
+		otp[i] = digits[num.Int64()]
 	}
-
-	// 2. Invalidar todas las sesiones del usuario (opcional)
-	err := invalidateAllUserSessions(ctx, request.UID)
-	if err != nil {
-		return nil, fmt.Errorf("error invalidating user sessions: %w", err)
-	}
-
-	// 3. Actualizar último logout
-	err = updateLastLogout(ctx, request.UID)
-	if err != nil {
-		// No es crítico si falla
-		fmt.Printf("Warning: failed to update last logout: %v", err)
-	}
-
-	return &LogoutResponse{
-		Success: true,
-		Message: "Logout exitoso",
-	}, nil
+	return string(otp), nil
 }
 
-// ValidateSession verifica si una sesión es válida
-func ValidateSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
-	session, err := getSession(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Verificar si la sesión ha expirado
-	if time.Now().After(session.ExpiresAt) {
-		// Invalidar sesión expirada
-		invalidateSession(ctx, sessionID)
-		return nil, fmt.Errorf("session expired")
-	}
-
-	// Verificar si está activa
-	if !session.Active {
-		return nil, fmt.Errorf("session inactive")
-	}
-
-	return session, nil
-}
-
-// RefreshSession renueva una sesión existente
-func RefreshSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
-	session, err := ValidateSession(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Extender expiración
-	newExpiresAt := time.Now().Add(24 * time.Hour) // 24 horas
-
-	err = updateSessionExpiration(ctx, sessionID, newExpiresAt)
-	if err != nil {
-		return nil, fmt.Errorf("error refreshing session: %w", err)
-	}
-
-	session.ExpiresAt = newExpiresAt
-	return session, nil
-}
-
-// === FUNCIONES AUXILIARES ===
-
-// verifyPassword verifica el password del usuario
-func verifyPassword(ctx context.Context, uid, password string) (bool, error) {
-	// Obtener hash del password desde Firestore
-	doc, err := firestore.GetDocument(ctx, "user_credentials", uid)
-	if err != nil {
-		return false, err
-	}
-
-	hashedPassword, ok := doc.Data["password_hash"].(string)
-	if !ok {
-		return false, fmt.Errorf("password hash not found")
-	}
-
-	// Comparar password
-	err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password))
-	return err == nil, nil
-}
-
-// getUserClaims obtiene los claims del usuario desde Firestore
 func getUserClaims(ctx context.Context, uid string) (map[string]interface{}, error) {
 	doc, err := firestore.GetDocument(ctx, "user_claims", uid)
 	if err != nil {
 		return nil, err
 	}
-
-	claims, ok := doc.Data["claims"].(map[string]interface{})
-	if !ok {
-		return map[string]interface{}{"role": "user"}, nil
-	}
-
-	return claims, nil
+	return doc.Data["claims"].(map[string]interface{}), nil
 }
 
-// createSession crea una nueva sesión
 func createSession(ctx context.Context, uid, email string) (string, time.Time, error) {
-	expiresAt := time.Now().Add(24 * time.Hour) // 24 horas
-	
+	expiresAt := time.Now().Add(24 * time.Hour)
 	sessionData := map[string]interface{}{
-		"uid":       uid,
-		"email":     email,
-		"active":    true,
+		"uid":        uid,
+		"email":      email,
+		"active":     true,
 		"expires_at": expiresAt,
-		"metadata": map[string]interface{}{
-			"ip":         "unknown", // Puedes agregar IP real
-			"user_agent": "unknown", // Puedes agregar user agent real
-		},
 	}
-
 	sessionID, err := firestore.CreateDocument(ctx, "user_sessions", sessionData)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-
-	return sessionID, expiresAt, nil
+	return sessionID, expiresAt, err
 }
 
-// getSession obtiene información de una sesión
-func getSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
-	doc, err := firestore.GetDocument(ctx, "user_sessions", sessionID)
-	if err != nil {
-		return nil, err
-	}
-
-	session := &SessionInfo{
-		SessionID: sessionID,
-		UID:       doc.Data["uid"].(string),
-		Email:     doc.Data["email"].(string),
-		Active:    doc.Data["active"].(bool),
-		CreatedAt: doc.Data["created_at"].(time.Time),
-		ExpiresAt: doc.Data["expires_at"].(time.Time),
-	}
-
-	if metadata, ok := doc.Data["metadata"].(map[string]interface{}); ok {
-		session.Metadata = metadata
-	}
-
-	claims, err := getUserClaims(ctx, session.UID)
-    if err != nil {
-        // No devolvemos un error si los claims no existen, simplemente estarán vacíos.
-        log.Printf("Advertencia: no se pudieron obtener los claims para el usuario %s: %v", session.UID, err)
-    } else {
-        session.Claims = claims
-    }
-
-	return session, nil
-}
-
-// invalidateSession invalida una sesión específica
-func invalidateSession(ctx context.Context, sessionID string) error {
-	return firestore.UpdateDocument(ctx, "user_sessions", sessionID, map[string]interface{}{
-		"active":    false,
-		"ended_at":  time.Now(),
-	})
-}
-
-// invalidateAllUserSessions invalida todas las sesiones de un usuario
-func invalidateAllUserSessions(ctx context.Context, uid string) error {
-	// Buscar todas las sesiones activas del usuario
-	sessions, err := firestore.QueryDocuments(ctx, "user_sessions", firebase.QueryOptions{
-		Filters: []firebase.QueryFilter{
-			{Field: "uid", Operator: "==", Value: uid},
-			{Field: "active", Operator: "==", Value: true},
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	// Invalidar todas las sesiones
-	var batchOps []firebase.BatchOperation
-	for _, session := range sessions {
-		batchOps = append(batchOps, firebase.BatchOperation{
-			Type:       "update",
-			Collection: "user_sessions",
-			DocumentID: session.ID,
-			Data: map[string]interface{}{
-				"active":   false,
-				"ended_at": time.Now(),
-			},
-		})
-	}
-
-	if len(batchOps) > 0 {
-		return firestore.BatchWrite(ctx, batchOps)
-	}
-
-	return nil
-}
-
-// updateLastLogin actualiza el timestamp del último login
 func updateLastLogin(ctx context.Context, uid string) error {
 	return firestore.UpdateDocument(ctx, "user_activity", uid, map[string]interface{}{
 		"last_login": time.Now(),
-		"login_count": firebase.IncrementValue(1), // Si usas increment
-	})
-}
-
-// updateLastLogout actualiza el timestamp del último logout
-func updateLastLogout(ctx context.Context, uid string) error {
-	return firestore.UpdateDocument(ctx, "user_activity", uid, map[string]interface{}{
-		"last_logout": time.Now(),
-	})
-}
-
-// updateSessionExpiration actualiza la expiración de una sesión
-func updateSessionExpiration(ctx context.Context, sessionID string, expiresAt time.Time) error {
-	return firestore.UpdateDocument(ctx, "user_sessions", sessionID, map[string]interface{}{
-		"expires_at": expiresAt,
-	})
-}
-
-// HashPassword genera un hash bcrypt del password
-func HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	return string(hash), nil
-}
-
-// StoreUserCredentials almacena las credenciales del usuario
-func StoreUserCredentials(ctx context.Context, uid, password string) error {
-	hashedPassword, err := HashPassword(password)
-	if err != nil {
-		return err
-	}
-
-	return firestore.CreateDocumentWithID(ctx, "user_credentials", uid, map[string]interface{}{
-		"password_hash": hashedPassword,
 	})
 }
